@@ -16,6 +16,7 @@ type Group = {
 type Post = {
   id: number;
   group_id: number;
+  author_id: string;
   content: string;
   type: string;
   created_at: string;
@@ -52,6 +53,12 @@ type PollVote = {
   user_id: string;
 };
 
+type Member = {
+  user_id: string;
+  role: string;
+  display_name: string | null;
+};
+
 export default function AppPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
@@ -64,6 +71,7 @@ export default function AppPage() {
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [pollOptions, setPollOptions] = useState<PollOption[]>([]);
   const [pollVotes, setPollVotes] = useState<PollVote[]>([]);
+  const [members, setMembers] = useState<Member[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [creatingGroup, setCreatingGroup] = useState(false);
   const [joiningGroup, setJoiningGroup] = useState(false);
@@ -124,7 +132,7 @@ export default function AppPage() {
     setError(null);
     const { data: posts, error: pErr } = await supabase
       .from("posts")
-      .select("id, group_id, content, type, created_at, author_name")
+      .select("id, group_id, author_id, content, type, created_at, author_name")
       .eq("group_id", groupId)
       .order("created_at", { ascending: false });
 
@@ -193,6 +201,19 @@ export default function AppPage() {
     }
 
     setPollVotes(voteRows || []);
+
+    const { data: memberRows, error: mErr } = await supabase
+      .from("group_memberships")
+      .select("user_id, role, display_name")
+      .eq("group_id", groupId);
+
+    if (mErr) {
+      console.error(mErr);
+      setError("Failed to load group members.");
+      return;
+    }
+
+    setMembers(memberRows || []);
   }
 
   async function handleCreateGroup(e: FormEvent<HTMLFormElement>) {
@@ -226,6 +247,7 @@ export default function AppPage() {
       user_id: userId,
       group_id: group.id,
       role: "owner",
+      display_name: displayName,
     });
 
     const newGroups = [group as Group, ...groups];
@@ -242,7 +264,8 @@ export default function AppPage() {
     setError(null);
     setJoiningGroup(true);
     const form = e.currentTarget;
-    const code = (form.elements.namedItem("code") as HTMLInputElement).value.trim();
+    const rawCode = (form.elements.namedItem("code") as HTMLInputElement).value;
+    const code = (rawCode || "").trim().toLowerCase();
     if (!code) {
       setError("Enter a group code.");
       setJoiningGroup(false);
@@ -251,12 +274,12 @@ export default function AppPage() {
 
     const { data: group, error: gErr } = await supabase
       .from("groups")
-      .select("id, name, code")
+      .select("id, name, code, owner_id")
       .eq("code", code)
-      .single();
+      .maybeSingle();
 
     if (gErr || !group) {
-      console.error(gErr);
+      console.error("join group error", gErr, "code=", code);
       setError("Group code not found.");
       setJoiningGroup(false);
       return;
@@ -267,6 +290,7 @@ export default function AppPage() {
         user_id: userId,
         group_id: group.id,
         role: "member",
+        display_name: displayName,
       },
       { onConflict: "user_id,group_id" }
     );
@@ -454,6 +478,18 @@ export default function AppPage() {
     if (error) {
       console.error(error);
       setError("Failed to vote.");
+      return;
+    }
+    await loadFeed(selectedGroupId);
+  }
+
+  async function handleDeletePost(postId: number) {
+    if (!selectedGroupId) return;
+    if (!window.confirm("Delete this post and its comments?")) return;
+    const { error } = await supabase.from("posts").delete().eq("id", postId);
+    if (error) {
+      console.error(error);
+      setError("Failed to delete post.");
       return;
     }
     await loadFeed(selectedGroupId);
@@ -670,6 +706,11 @@ export default function AppPage() {
                     const postComments = comments.filter((c) => c.post_id === p.id);
                     const postAttachments = attachments.filter((a) => a.post_id === p.id);
 
+                    const canDeletePost =
+                      !!userId &&
+                      (userId === p.author_id ||
+                        (selectedGroup && userId === selectedGroup.owner_id));
+
                     const isPollPost = p.type === "poll";
                     const optionsForPost = pollOptions.filter((o) => o.post_id === p.id);
                     let totalVotes = 0;
@@ -690,9 +731,17 @@ export default function AppPage() {
                       >
                         <div className="flex justify-between text-[11px] text-slate-500 mb-1">
                           <span>{p.author_name || (isPollPost ? "Poll" : "Message")}</span>
-                          <span>
-                            {new Date(p.created_at).toLocaleString()}
-                          </span>
+                          <div className="flex items-center gap-2">
+                            <span>{new Date(p.created_at).toLocaleString()}</span>
+                            {canDeletePost && (
+                              <button
+                                onClick={() => handleDeletePost(p.id)}
+                                className="px-2 py-0.5 rounded-md bg-red-700 hover:bg-red-600 text-[10px]"
+                              >
+                                Delete
+                              </button>
+                            )}
+                          </div>
                         </div>
                         <div className="mb-2 whitespace-pre-wrap break-words">
                           {p.content}
@@ -797,6 +846,42 @@ export default function AppPage() {
             </>
           )}
         </main>
+
+        {/* Right sidebar: group members */}
+        {selectedGroup && (
+          <aside className="hidden md:block w-64 border-l border-slate-800 p-4 bg-slate-950/60">
+            <h3 className="text-xs font-semibold uppercase text-slate-400 tracking-wide mb-2">
+              Members
+            </h3>
+            {members.length === 0 ? (
+              <div className="text-xs text-slate-500">No members yet.</div>
+            ) : (
+              <ul className="space-y-1 text-xs">
+                {[...members]
+                  .sort((a, b) => {
+                    const aOwner = a.role === "owner" || a.user_id === selectedGroup.owner_id;
+                    const bOwner = b.role === "owner" || b.user_id === selectedGroup.owner_id;
+                    if (aOwner && !bOwner) return -1;
+                    if (!aOwner && bOwner) return 1;
+                    return (a.display_name || "").localeCompare(b.display_name || "");
+                  })
+                  .map((m) => {
+                    const isOwner = m.role === "owner" || m.user_id === selectedGroup.owner_id;
+                    return (
+                      <li key={m.user_id} className="flex items-center justify-between">
+                        <span>{m.display_name || "Member"}</span>
+                        {isOwner && (
+                          <span className="ml-2 px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 text-[10px] font-semibold">
+                            Owner
+                          </span>
+                        )}
+                      </li>
+                    );
+                  })}
+              </ul>
+            )}
+          </aside>
+        )}
       </div>
     </div>
   );

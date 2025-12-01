@@ -24,6 +24,10 @@ export default function RegisterPage() {
       return;
     }
 
+    const redirectTo = typeof window !== "undefined"
+      ? `${window.location.origin}/auth/confirmed`
+      : undefined;
+
     const { error } = await supabase.auth.signUp({
       email,
       password,
@@ -31,6 +35,7 @@ export default function RegisterPage() {
         data: {
           full_name: trimmedName,
         },
+        emailRedirectTo: redirectTo,
       },
     });
 

@@ -57,7 +57,19 @@ type Member = {
   user_id: string;
   role: string;
   display_name: string | null;
+  notify_on_post: boolean | null;
 };
+
+function ensureNotificationPermission() {
+  if (typeof window === "undefined" || !("Notification" in window)) {
+    return;
+  }
+  if (Notification.permission === "default") {
+    Notification.requestPermission().catch((err) => {
+      console.error("Notification permission error", err);
+    });
+  }
+}
 
 export default function AppPage() {
   const router = useRouter();
@@ -204,7 +216,7 @@ export default function AppPage() {
 
     const { data: memberRows, error: mErr } = await supabase
       .from("group_memberships")
-      .select("user_id, role, display_name")
+      .select("user_id, role, display_name, notify_on_post")
       .eq("group_id", groupId);
 
     if (mErr) {
@@ -248,6 +260,7 @@ export default function AppPage() {
       group_id: group.id,
       role: "owner",
       display_name: displayName,
+      notify_on_post: true,
     });
 
     const newGroups = [group as Group, ...groups];
@@ -291,6 +304,7 @@ export default function AppPage() {
         group_id: group.id,
         role: "member",
         display_name: displayName,
+        notify_on_post: true,
       },
       { onConflict: "user_id,group_id" }
     );
@@ -496,6 +510,67 @@ export default function AppPage() {
   }
 
   const selectedGroup = groups.find((g) => g.id === selectedGroupId) || null;
+
+  useEffect(() => {
+    if (!userId || !selectedGroupId || !selectedGroup) return;
+    if (typeof window === "undefined" || !("Notification" in window)) return;
+
+    const groupId = selectedGroupId;
+    const groupName = selectedGroup.name;
+
+    const channel = supabase
+      .channel(`group-posts-${groupId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "posts",
+          filter: `group_id=eq.${groupId}`,
+        },
+        (payload) => {
+          try {
+            const newPost = payload.new as {
+              id: number;
+              group_id: number;
+              author_id: string;
+              content: string | null;
+              author_name: string | null;
+            };
+
+            if (!newPost) return;
+
+            if (newPost.author_id === userId) return;
+
+            const me = members.find((m) => m.user_id === userId);
+            if (me && me.notify_on_post === false) return;
+
+            if (Notification.permission !== "granted") return;
+
+            const content = (newPost.content ?? "").trim();
+            const body =
+              (newPost.author_name || "Someone") +
+              (content ? `: ${content.slice(0, 120)}` : "");
+
+            new Notification(`New post in ${groupName}`, {
+              body,
+              tag: `post-${newPost.id}`,
+            });
+          } catch (err) {
+            console.error("Error handling realtime post notification", err);
+          }
+        }
+      )
+      .subscribe((status) => {
+        if (status === "SUBSCRIBED") {
+          ensureNotificationPermission();
+        }
+      });
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [userId, selectedGroupId, selectedGroup, members]);
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-900 text-slate-100">
@@ -847,7 +922,7 @@ export default function AppPage() {
           )}
         </main>
 
-        {/* Right sidebar: group members */}
+        {/* Right sidebar: group members + notification toggle for current user */}
         {selectedGroup && (
           <aside className="hidden md:block w-64 border-l border-slate-800 p-4 bg-slate-950/60">
             <h3 className="text-xs font-semibold uppercase text-slate-400 tracking-wide mb-2">
@@ -856,7 +931,7 @@ export default function AppPage() {
             {members.length === 0 ? (
               <div className="text-xs text-slate-500">No members yet.</div>
             ) : (
-              <ul className="space-y-1 text-xs">
+              <ul className="space-y-1 text-xs mb-4">
                 {[...members]
                   .sort((a, b) => {
                     const aOwner = a.role === "owner" || a.user_id === selectedGroup.owner_id;
@@ -870,15 +945,56 @@ export default function AppPage() {
                     return (
                       <li key={m.user_id} className="flex items-center justify-between">
                         <span>{m.display_name || "Member"}</span>
-                        {isOwner && (
-                          <span className="ml-2 px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 text-[10px] font-semibold">
-                            Owner
-                          </span>
-                        )}
+                        <div className="flex items-center gap-1">
+                          {isOwner && (
+                            <span className="ml-2 px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 text-[10px] font-semibold">
+                              Owner
+                            </span>
+                          )}
+                        </div>
                       </li>
                     );
                   })}
               </ul>
+            )}
+
+            {/* Current user's notification toggle for this group */}
+            {userId && (
+              (() => {
+                const me = members.find((m) => m.user_id === userId);
+                if (!me) return null;
+                const enabled = me.notify_on_post ?? true;
+                return (
+                  <label className="flex items-center gap-2 text-[11px] text-slate-300">
+                    <input
+                      type="checkbox"
+                      checked={enabled}
+                      onChange={async (e) => {
+                        const next = e.target.checked;
+                        const { error } = await supabase
+                          .from("group_memberships")
+                          .update({ notify_on_post: next })
+                          .eq("group_id", selectedGroup.id)
+                          .eq("user_id", userId);
+                        if (error) {
+                          console.error(error);
+                          setError("Failed to update notification setting.");
+                          return;
+                        }
+                        if (next) {
+                          ensureNotificationPermission();
+                        }
+                        setMembers(
+                          members.map((m) =>
+                            m.user_id === userId ? { ...m, notify_on_post: next } : m
+                          )
+                        );
+                      }}
+                    />
+                    Notify me when someone posts
+                  </label>
+                );
+              })()
             )}
           </aside>
         )}

@@ -535,13 +535,31 @@ export default function AppPage() {
               group_id: number;
               author_id: string;
               content: string | null;
+              type: string;
+              created_at: string;
               author_name: string | null;
             };
 
             if (!newPost) return;
 
-            if (newPost.author_id === userId) return;
+            // For everyone except the author, insert the new post into local state
+            if (newPost.author_id !== userId && newPost.group_id === groupId) {
+              setFeed((prev) => {
+                if (prev.some((p) => p.id === newPost.id)) return prev;
+                const asPost: Post = {
+                  id: newPost.id,
+                  group_id: newPost.group_id,
+                  author_id: newPost.author_id,
+                  content: newPost.content ?? "",
+                  type: newPost.type,
+                  created_at: newPost.created_at,
+                  author_name: newPost.author_name,
+                };
+                return [asPost, ...prev];
+              });
+            }
 
+            // Notifications respect the user's per-group setting
             const me = members.find((m) => m.user_id === userId);
             if (me && me.notify_on_post === false) return;
 
